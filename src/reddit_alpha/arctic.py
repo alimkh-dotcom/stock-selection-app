@@ -245,6 +245,15 @@ class ArcticShiftClient:
     def search_comments(self, **params: Any) -> Iterator[dict[str, Any]]:
         return self.paginate("comments/search", params)
 
-    def thread_comments(self, post_id: str) -> Iterator[dict[str, Any]]:
-        """All comments on one submission. ``post_id`` is the bare id, no prefix."""
-        return self.paginate("comments/search", {"link_id": f"t3_{post_id}"})
+    def thread_comments(
+        self, post_id: str, limit: int | None = None
+    ) -> Iterator[dict[str, Any]]:
+        """Comments on one submission, oldest first.
+
+        ``post_id`` is the bare id with no ``t3_`` prefix. ``limit`` caps how
+        many are read; see ``Collector.crawl_thread_comments`` for why capping
+        is usually necessary and what it costs.
+        """
+        return self.paginate(
+            "comments/search", {"link_id": f"t3_{post_id}"}, stop_after=limit
+        )

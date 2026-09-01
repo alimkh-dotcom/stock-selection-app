@@ -62,8 +62,9 @@ class StubClient:
             ]
         )
 
-    def thread_comments(self, post_id):
-        return iter([{"id": f"{post_id}-c{i}", "created_utc": 1700000000 + i} for i in range(3)])
+    def thread_comments(self, post_id, limit=None):
+        n = 3 if limit is None else min(limit, 3)
+        return iter([{"id": f"{post_id}-c{i}", "created_utc": 1700000000 + i} for i in range(n)])
 
 
 def build(tmp_path, client):
@@ -145,3 +146,138 @@ def test_comments_tagged_with_thread_type(tmp_path):
     assert len(stored) == 3
     assert all(r["_thread_type"] == "moves_tomorrow" for r in stored)
     assert all(r["_thread_id"] == "t1" for r in stored)
+
+
+class CappedStubClient:
+    """Serves a large thread so the cap has something to bite on."""
+
+    def __init__(self, total=500):
+        self.total = total
+
+    def thread_comments(self, post_id, limit=None):
+        n = self.total if limit is None else min(limit, self.total)
+        return iter(
+            [{"id": f"{post_id}-c{i}", "created_utc": 1700000000 + i} for i in range(n)]
+        )
+
+
+def _thread(tid="t1"):
+    return {"id": tid, "created_utc": 1700000000, "thread_type": "moves_tomorrow",
+            "subreddit": "wallstreetbets", "title": "x", "author": "y"}
+
+
+def test_cap_limits_comments_taken(tmp_path):
+    c = Collector(CappedStubClient(500), RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
+    stats = c.crawl_thread_comments([_thread()], max_per_thread=120)
+    assert stats.records == 120
+
+
+def test_truncation_is_recorded(tmp_path):
+    """A truncated thread must be distinguishable from a fully-read one."""
+    c = Collector(CappedStubClient(500), RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
+    stats = c.crawl_thread_comments([_thread()], max_per_thread=120)
+    assert stats.units_truncated == 1
+    kinds = [i[1] for i in c.manifest.issues()]
+    assert "thread_truncated" in kinds
+
+
+def test_small_thread_under_cap_is_not_flagged(tmp_path):
+    """Threads read in full must not be marked truncated, or the flag is useless."""
+    c = Collector(CappedStubClient(30), RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
+    stats = c.crawl_thread_comments([_thread()], max_per_thread=120)
+    assert stats.records == 30
+    assert stats.units_truncated == 0
+    assert c.manifest.issues() == []
+
+
+def test_uncapped_reads_everything(tmp_path):
+    c = Collector(CappedStubClient(500), RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
+    assert c.crawl_thread_comments([_thread()]).records == 500
+
+
+# --- discovery -------------------------------------------------------------
+
+from datetime import datetime, timezone
+
+from reddit_alpha.collect import dedupe_threads, month_windows
+
+
+def test_month_windows_cover_the_range_without_gaps_or_overlap():
+    windows = list(month_windows(date(2024, 1, 15), date(2024, 4, 10)))
+    assert windows[0] == (date(2024, 1, 15), date(2024, 2, 1))
+    assert windows[-1] == (date(2024, 4, 1), date(2024, 4, 10))
+    for (_, end_a), (start_b, _) in zip(windows, windows[1:]):
+        assert end_a == start_b, "a gap or overlap between months would lose threads"
+
+
+def test_month_windows_handle_february():
+    windows = list(month_windows(date(2024, 2, 1), date(2024, 3, 5)))
+    assert windows[0] == (date(2024, 2, 1), date(2024, 3, 1))
+
+
+class DiscoveryStub:
+    """Returns one genuine daily thread plus one body-match false positive."""
+
+    def __init__(self):
+        self.queries = []
+
+    def search_posts(self, **params):
+        self.queries.append((params["query"], params["after"]))
+        if params["query"] != "what are your moves tomorrow":
+            return iter([])
+        return iter([
+            {"id": "good", "created_utc": 1709000000,
+             "title": "What Are Your Moves Tomorrow, February 27, 2024", "score": 50},
+            {"id": "bad", "created_utc": 1709000100,
+             "title": "Market Outlook 03/07", "score": 5},
+        ])
+
+
+def test_discovery_rejects_body_matches(tmp_path):
+    """The API matches body text; only real titles may become threads."""
+    c = Collector(DiscoveryStub(), RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
+    threads = c.discover_daily_threads(date(2024, 2, 1), date(2024, 3, 1))
+    assert [t["id"] for t in threads] == ["good"]
+
+
+def test_discovery_queries_every_month_and_type(tmp_path):
+    client = DiscoveryStub()
+    c = Collector(client, RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
+    c.discover_daily_threads(date(2024, 1, 1), date(2024, 4, 1))
+    assert len(client.queries) == 4 * 3, "missed a thread type or a month"
+
+
+def _t(tid, ts, score=0, stickied=False, kind="moves_tomorrow"):
+    return {"id": tid, "created_utc": ts, "thread_type": kind,
+            "score": score, "stickied": stickied}
+
+
+def test_dedupe_prefers_the_stickied_thread():
+    """A repost can outscore the official thread; stickied settles it."""
+    ts = 1709000000
+    kept, dropped = dedupe_threads([
+        _t("repost", ts, score=999),
+        _t("official", ts + 60, score=10, stickied=True),
+    ])
+    assert [t["id"] for t in kept] == ["official"]
+    assert dropped == 1
+
+
+def test_dedupe_falls_back_to_score():
+    ts = 1709000000
+    kept, _ = dedupe_threads([_t("small", ts, score=3), _t("big", ts + 60, score=300)])
+    assert [t["id"] for t in kept] == ["big"]
+
+
+def test_dedupe_keeps_different_days_and_types():
+    day1, day2 = 1709000000, 1709000000 + 86400
+    kept, dropped = dedupe_threads([
+        _t("a", day1), _t("b", day2),
+        _t("c", day1, kind="daily_discussion"),
+    ])
+    assert len(kept) == 3 and dropped == 0
+
+
+def test_dedupe_leaves_no_internal_fields():
+    kept, _ = dedupe_threads([_t("a", 1709000000)])
+    assert "_rank" not in kept[0], "internal ranking leaked into the output"
