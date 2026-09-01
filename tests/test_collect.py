@@ -240,11 +240,28 @@ def test_discovery_rejects_body_matches(tmp_path):
     assert [t["id"] for t in threads] == ["good"]
 
 
-def test_discovery_queries_every_month_and_type(tmp_path):
+def test_discovery_queries_every_window_and_type(tmp_path):
     client = DiscoveryStub()
     c = Collector(client, RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
-    c.discover_daily_threads(date(2024, 1, 1), date(2024, 4, 1))
+    c.discover_daily_threads(date(2024, 1, 1), date(2024, 4, 1), window_months=1)
     assert len(client.queries) == 4 * 3, "missed a thread type or a month"
+
+
+def test_wider_windows_mean_fewer_requests(tmp_path):
+    """Rate limit is the binding constraint, so window width must actually reduce calls."""
+    client = DiscoveryStub()
+    c = Collector(client, RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
+    c.discover_daily_threads(date(2024, 1, 1), date(2025, 1, 1), window_months=12)
+    assert len(client.queries) == 4, "a year should be one window per thread type"
+
+
+def test_windows_still_cover_the_full_range_when_widened():
+    from reddit_alpha.collect import month_windows
+    windows = list(month_windows(date(2017, 1, 1), date(2020, 1, 1), months=12))
+    assert windows[0][0] == date(2017, 1, 1)
+    assert windows[-1][1] == date(2020, 1, 1)
+    for (_, end_a), (start_b, _) in zip(windows, windows[1:]):
+        assert end_a == start_b
 
 
 def _t(tid, ts, score=0, stickied=False, kind="moves_tomorrow"):

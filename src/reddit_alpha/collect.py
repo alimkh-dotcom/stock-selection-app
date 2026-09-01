@@ -77,11 +77,19 @@ QUERY_FOR_THREAD_TYPE = {
 }
 
 
-def month_windows(start: date, end: date) -> Iterator[tuple[date, date]]:
-    """Yield [month_start, next_month_start) windows covering [start, end)."""
+def month_windows(start: date, end: date, months: int = 1) -> Iterator[tuple[date, date]]:
+    """Yield [window_start, window_end) windows of ``months`` covering [start, end).
+
+    Wider windows mean far fewer requests: pagination reads 100 results per
+    request either way, so a year-wide window costs about five requests where
+    twelve month-wide windows cost twelve. Rate limit is the binding constraint
+    here, so the width is worth tuning.
+    """
     current = start.replace(day=1)
     while current < end:
-        nxt = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
+        nxt = current
+        for _ in range(months):
+            nxt = (nxt.replace(day=28) + timedelta(days=4)).replace(day=1)
         yield max(current, start), min(nxt, end)
         current = nxt
 
@@ -195,8 +203,9 @@ class Collector:
         start: date,
         end: date,
         subreddit: str = "wallstreetbets",
+        window_months: int = 12,
     ) -> list[dict[str, Any]]:
-        """Find daily threads by searching titles directly, month by month.
+        """Find daily threads by searching titles directly.
 
         The alternative -- scanning every submission and filtering -- costs about
         nine hours for this subreddit's full history. A targeted search costs one
@@ -210,7 +219,7 @@ class Collector:
 
         for kind, _ in THREAD_PATTERNS:
             query = QUERY_FOR_THREAD_TYPE[kind]
-            for window_start, window_end in month_windows(start, end):
+            for window_start, window_end in month_windows(start, end, window_months):
                 unit = f"discover/{subreddit}/{kind}/{window_start.isoformat()}"
                 try:
                     hits = list(

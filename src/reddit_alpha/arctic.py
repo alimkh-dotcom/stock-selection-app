@@ -45,9 +45,9 @@ class RateLimiter:
     than hard-code a guess.
     """
 
-    min_interval: float = 1.2
-    max_interval: float = 30.0
-    interval: float = 1.2
+    min_interval: float = 1.6
+    max_interval: float = 20.0
+    interval: float = 1.6
     _last_call: float = field(default=0.0, repr=False)
     _clean_streak: int = field(default=0, repr=False)
 
@@ -87,6 +87,7 @@ class ArcticShiftClient:
 
     def _request(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         last_error: str | None = None
+        consecutive_failures = 0
 
         for attempt in range(self.max_retries):
             self.limiter.wait()
@@ -97,7 +98,8 @@ class ArcticShiftClient:
             except requests.RequestException as exc:
                 last_error = f"transport: {exc}"
                 self.limiter.penalise()
-                self._sleep_backoff(attempt)
+                consecutive_failures += 1
+                self._sleep_backoff(attempt, None, consecutive_failures)
                 continue
 
             # The service signals overload with 422 and a JSON error body rather
@@ -121,21 +123,35 @@ class ArcticShiftClient:
                 raise ArcticShiftError(f"{path} rejected the query: {last_error}")
 
             self.limiter.penalise()
-            self._sleep_backoff(attempt, resp.headers.get("x-ratelimit-reset"))
+            consecutive_failures += 1
+            self._sleep_backoff(
+                attempt, resp.headers.get("x-ratelimit-reset"), consecutive_failures
+            )
 
         raise ArcticShiftError(
             f"{path} failed after {self.max_retries} attempts: {last_error}"
         )
 
-    def _sleep_backoff(self, attempt: int, reset_hint: str | None = None) -> None:
-        if reset_hint:
+    # Waiting for the full rate-limit window on every hiccup is ruinous: the
+    # server reports a ~58s reset, so honouring it immediately turns a transient
+    # failure into a minute of idleness. Most failures clear within seconds, so
+    # back off briefly first and only wait out the window once it is clear the
+    # budget really is exhausted.
+    RESET_WAIT_AFTER_FAILURES = 3
+
+    def _sleep_backoff(
+        self,
+        attempt: int,
+        reset_hint: str | None = None,
+        consecutive_failures: int = 0,
+    ) -> None:
+        if reset_hint and consecutive_failures >= self.RESET_WAIT_AFTER_FAILURES:
             try:
-                # The server tells us when the window resets; honour it.
                 time.sleep(min(float(reset_hint) + 1, 90))
                 return
             except (TypeError, ValueError):
                 pass
-        time.sleep(min(2**attempt, 60) + random.uniform(0, 1))
+        time.sleep(min(3 * 2**attempt, 30) + random.uniform(0, 1))
 
     def paginate(
         self,
