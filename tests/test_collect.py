@@ -216,43 +216,87 @@ def test_month_windows_handle_february():
 
 
 class DiscoveryStub:
-    """Returns one genuine daily thread plus one body-match false positive."""
+    """Serves the daily-thread posters' output, including their other posts."""
 
     def __init__(self):
         self.queries = []
 
     def search_posts(self, **params):
-        self.queries.append((params["query"], params["after"]))
-        if params["query"] != "what are your moves tomorrow":
+        self.queries.append((params.get("author"), params["after"]))
+        if params.get("author") != "AutoModerator":
             return iter([])
         return iter([
             {"id": "good", "created_utc": 1709000000,
              "title": "What Are Your Moves Tomorrow, February 27, 2024", "score": 50},
-            {"id": "bad", "created_utc": 1709000100,
-             "title": "Market Outlook 03/07", "score": 5},
+            {"id": "other", "created_utc": 1709000100,
+             "title": "Weekly Earnings Thread — please read the rules", "score": 5},
         ])
 
 
-def test_discovery_rejects_body_matches(tmp_path):
-    """The API matches body text; only real titles may become threads."""
+def test_discovery_keeps_only_daily_threads(tmp_path):
+    """These accounts post plenty besides the daily thread; the title decides."""
     c = Collector(DiscoveryStub(), RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
     threads = c.discover_daily_threads(date(2024, 2, 1), date(2024, 3, 1))
     assert [t["id"] for t in threads] == ["good"]
 
 
-def test_discovery_queries_every_window_and_type(tmp_path):
+def test_discovery_covers_every_author_and_window(tmp_path):
+    """The posting account changed once already; querying only one loses years."""
     client = DiscoveryStub()
     c = Collector(client, RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
     c.discover_daily_threads(date(2024, 1, 1), date(2024, 4, 1), window_months=1)
-    assert len(client.queries) == 4 * 3, "missed a thread type or a month"
+    authors = {a for a, _ in client.queries}
+    assert authors == {"AutoModerator", "OPINION_IS_UNPOPULAR"}
+    assert len(client.queries) == 2 * 3, "missed an author or a month"
 
 
 def test_wider_windows_mean_fewer_requests(tmp_path):
-    """Rate limit is the binding constraint, so window width must actually reduce calls."""
+    """Rate limit is the binding constraint, so window width must reduce calls."""
     client = DiscoveryStub()
     c = Collector(client, RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
     c.discover_daily_threads(date(2024, 1, 1), date(2025, 1, 1), window_months=12)
-    assert len(client.queries) == 4, "a year should be one window per thread type"
+    assert len(client.queries) == 2, "a year should be one window per author"
+
+
+# --- coverage checking -----------------------------------------------------
+
+def _thread_on(day, kind="moves_tomorrow"):
+    import datetime as dt
+    ts = int(dt.datetime.combine(day, dt.time(21, 0), dt.timezone.utc).timestamp())
+    return {"id": f"{day}-{kind}", "created_utc": ts, "thread_type": kind}
+
+
+def test_coverage_flags_a_month_with_almost_nothing():
+    """If the posting account changes again, a month goes near-empty.
+
+    That must be visible: a crawl that quietly skipped a period would make every
+    later result untrustworthy with nothing looking wrong.
+    """
+    from reddit_alpha.collect import coverage_report
+    threads = [_thread_on(date(2024, 1, d)) for d in range(1, 23)]
+    threads += [_thread_on(date(2024, 2, d)) for d in range(1, 3)]   # only 2
+    report = coverage_report(threads)
+    assert "2024-02" in report["suspicious_months"]
+    assert "2024-01" not in report["suspicious_months"]
+
+
+def test_coverage_flags_an_entirely_missing_month():
+    from reddit_alpha.collect import coverage_report
+    threads = [_thread_on(date(2024, 1, d)) for d in range(1, 23)]
+    threads += [_thread_on(date(2024, 3, d)) for d in range(1, 23)]
+    assert coverage_report(threads)["missing_months"] == ["2024-02"]
+
+
+def test_coverage_is_quiet_on_healthy_data():
+    from reddit_alpha.collect import coverage_report
+    threads = [_thread_on(date(2024, m, d)) for m in (1, 2, 3) for d in range(1, 23)]
+    report = coverage_report(threads)
+    assert report["suspicious_months"] == [] and report["missing_months"] == []
+
+
+def test_coverage_on_empty_input_does_not_crash():
+    from reddit_alpha.collect import coverage_report
+    assert coverage_report([])["months"] == 0
 
 
 def test_windows_still_cover_the_full_range_when_widened():
@@ -298,3 +342,18 @@ def test_dedupe_keeps_different_days_and_types():
 def test_dedupe_leaves_no_internal_fields():
     kept, _ = dedupe_threads([_t("a", 1709000000)])
     assert "_rank" not in kept[0], "internal ranking leaked into the output"
+
+
+def test_discovery_checkpoints_as_it_goes(tmp_path):
+    """Discovery can run for an hour against a throttled source.
+
+    Writing results only at the end would throw all of it away on an
+    interruption, which for this source is the expected case, not the rare one.
+    """
+    client = DiscoveryStub()
+    c = Collector(client, RawStore(tmp_path / "raw"), Manifest(tmp_path / "m.db"))
+    saves = []
+    c.discover_daily_threads(date(2024, 1, 1), date(2024, 4, 1), window_months=1,
+                             checkpoint=lambda partial: saves.append(len(partial)))
+    assert len(saves) >= 3, "did not persist partial results between windows"
+    assert saves[-1] >= 1, "checkpointed an empty result set"

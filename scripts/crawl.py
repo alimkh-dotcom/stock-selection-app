@@ -23,7 +23,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from reddit_alpha.arctic import ArcticShiftClient, RateLimiter
-from reddit_alpha.collect import SUBREDDITS, Collector, dedupe_threads
+from reddit_alpha.collect import (
+    SUBREDDITS, Collector, coverage_report, dedupe_threads,
+)
 from reddit_alpha.patient import PatienceConfig, PatientRunner
 from reddit_alpha.storage import Manifest, RawStore
 
@@ -67,11 +69,20 @@ def main() -> int:
     started = time.monotonic()
 
     if args.stage == "discover":
-        raw_threads = []
-        for sub in args.subreddits:
-            raw_threads.extend(collector.discover_daily_threads(args.start, args.end, sub))
-        threads, dropped = dedupe_threads(raw_threads)
         out = args.data_dir / "daily_threads.json"
+        # Resume from whatever an earlier interrupted run managed to save.
+        existing = json.loads(out.read_text()) if out.exists() else []
+        raw_threads = list(existing)
+
+        def save(partial: list) -> None:
+            merged, _ = dedupe_threads(existing + partial)
+            out.write_text(json.dumps(merged, indent=2))
+
+        for sub in args.subreddits:
+            raw_threads.extend(
+                collector.discover_daily_threads(args.start, args.end, sub, checkpoint=save)
+            )
+        threads, dropped = dedupe_threads(raw_threads)
         out.write_text(json.dumps(threads, indent=2))
         by_type: dict[str, int] = {}
         for t in threads:
@@ -81,6 +92,17 @@ def main() -> int:
         print(f"({dropped} same-day duplicates dropped)")
         for kind, count in sorted(by_type.items()):
             print(f"  {kind:20s} {count}")
+        cov = coverage_report(threads)
+        print(f"\ncoverage: {cov['months']} months, median "
+              f"{cov.get('median_per_month', 0)} threads/month")
+        if cov.get("suspicious_months") or cov.get("missing_months"):
+            print("  WARNING -- discovery may be incomplete:")
+            if cov.get("missing_months"):
+                print(f"    months with no threads at all: {cov['missing_months']}")
+            if cov.get("suspicious_months"):
+                print(f"    months well below expected:    {cov['suspicious_months']}")
+            print("    likely cause: the daily thread moved to a posting account "
+                  "not in DAILY_THREAD_AUTHORS")
         return 0
 
     if args.stage == "posts":
@@ -98,6 +120,17 @@ def main() -> int:
         print(f"\n{len(threads)} daily threads -> {out}")
         for kind, count in sorted(by_type.items()):
             print(f"  {kind:20s} {count}")
+        cov = coverage_report(threads)
+        print(f"\ncoverage: {cov['months']} months, median "
+              f"{cov.get('median_per_month', 0)} threads/month")
+        if cov.get("suspicious_months") or cov.get("missing_months"):
+            print("  WARNING -- discovery may be incomplete:")
+            if cov.get("missing_months"):
+                print(f"    months with no threads at all: {cov['missing_months']}")
+            if cov.get("suspicious_months"):
+                print(f"    months well below expected:    {cov['suspicious_months']}")
+            print("    likely cause: the daily thread moved to a posting account "
+                  "not in DAILY_THREAD_AUTHORS")
         return 0
 
     else:  # comments

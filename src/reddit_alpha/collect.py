@@ -22,7 +22,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .arctic import ArcticShiftClient, ArcticShiftError
 from .fields import project_comment, project_post
@@ -65,6 +65,24 @@ def classify_thread(title: str) -> str | None:
             return kind
     return None
 
+
+# The accounts that post the daily threads. Discovering by author turned out to
+# beat searching titles on both counts: it is faster (0.8-3.3s versus 4.7-5.2s
+# per request, and far less prone to being throttled) and it finds *more*
+# threads -- 45 against 29 for January 2021, so the title search was silently
+# missing about a third of them.
+#
+# The author set is not a substitute for title verification. The posting account
+# changed once already (AutoModerator through 2021, OPINION_IS_UNPOPULAR by
+# 2023) and could change again, so every candidate is still confirmed by title,
+# and coverage is checked against the trading calendar to make a missing account
+# visible rather than silent.
+DAILY_THREAD_AUTHORS = ["AutoModerator", "OPINION_IS_UNPOPULAR"]
+
+# Roughly one daily thread per trading day, ~21 per month. A month far below
+# this suggests an unknown posting account rather than a quiet month.
+EXPECTED_THREADS_PER_MONTH = 21
+COVERAGE_ALERT_RATIO = 0.5
 
 # The search term for each thread type. Kept separate from the verification
 # patterns above: the query is what the API matches loosely, the pattern is what
@@ -125,6 +143,50 @@ def dedupe_threads(threads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]],
     for t in kept:
         t.pop("_rank", None)
     return kept, dropped
+
+
+def coverage_report(threads: list[dict[str, Any]]) -> dict[str, Any]:
+    """Flag months holding far fewer threads than a trading calendar implies.
+
+    Discovery keys on a known set of posting accounts, and that set has changed
+    before. If it changes again, whole months go missing -- and a crawl that
+    quietly skipped a period would make every later result untrustworthy without
+    anything looking wrong. This turns that failure into a visible one.
+    """
+    from collections import Counter
+
+    by_month: Counter[str] = Counter()
+    for thread in threads:
+        month = datetime.fromtimestamp(
+            thread["created_utc"], timezone.utc
+        ).strftime("%Y-%m")
+        if thread["thread_type"] in ("moves_tomorrow", "daily_discussion"):
+            by_month[month] += 1
+
+    if not by_month:
+        return {"months": 0, "suspicious_months": [], "total_threads": len(threads)}
+
+    threshold = EXPECTED_THREADS_PER_MONTH * COVERAGE_ALERT_RATIO
+    suspicious = sorted(m for m, n in by_month.items() if n < threshold)
+    months = sorted(by_month)
+    # Gaps in the month sequence are worse than thin months: nothing at all.
+    missing = []
+    year, mon = (int(x) for x in months[0].split("-"))
+    while f"{year:04d}-{mon:02d}" <= months[-1]:
+        key = f"{year:04d}-{mon:02d}"
+        if key not in by_month:
+            missing.append(key)
+        mon += 1
+        if mon > 12:
+            year, mon = year + 1, 1
+
+    return {
+        "months": len(by_month),
+        "total_threads": len(threads),
+        "median_per_month": sorted(by_month.values())[len(by_month) // 2],
+        "suspicious_months": suspicious,
+        "missing_months": missing,
+    }
 
 
 def day_range(start: date, end: date) -> Iterator[date]:
@@ -204,6 +266,7 @@ class Collector:
         end: date,
         subreddit: str = "wallstreetbets",
         window_months: int = 12,
+        checkpoint: "Callable[[list[dict[str, Any]]], None] | None" = None,
     ) -> list[dict[str, Any]]:
         """Find daily threads by searching titles directly.
 
@@ -217,15 +280,14 @@ class Collector:
         """
         found: dict[str, dict[str, Any]] = {}
 
-        for kind, _ in THREAD_PATTERNS:
-            query = QUERY_FOR_THREAD_TYPE[kind]
+        for author in DAILY_THREAD_AUTHORS:
             for window_start, window_end in month_windows(start, end, window_months):
-                unit = f"discover/{subreddit}/{kind}/{window_start.isoformat()}"
+                unit = f"discover/{subreddit}/{author}/{window_start.isoformat()}"
                 try:
                     hits = list(
                         self.client.search_posts(
                             subreddit=subreddit,
-                            query=query,
+                            author=author,
                             after=window_start.isoformat(),
                             before=window_end.isoformat(),
                         )
@@ -235,10 +297,14 @@ class Collector:
                     self.manifest.note_issue(unit, "discovery_failed", str(exc))
                     continue
 
+                kept = 0
                 for post in hits:
-                    # The query matches body text too, so confirm on the title.
-                    if classify_thread(post.get("title", "")) != kind:
+                    # These accounts post plenty besides the daily threads, so
+                    # the title still decides.
+                    kind = classify_thread(post.get("title", ""))
+                    if kind is None:
                         continue
+                    kept += 1
                     found[post["id"]] = {
                         "id": post["id"],
                         "title": post["title"],
@@ -250,10 +316,14 @@ class Collector:
                         "stickied": bool(post.get("stickied")),
                         "distinguished": post.get("distinguished"),
                     }
-                log.info("%s -> %d threads", unit, len(hits))
+                log.info("%s -> %d posts, %d daily threads", unit, len(hits), kept)
+                if checkpoint is not None:
+                    # Against a source this slow, discovery can run for an hour.
+                    # Writing only at the end would throw all of it away on an
+                    # interruption, so results are persisted as they arrive.
+                    checkpoint(sorted(found.values(), key=lambda t: t["created_utc"]))
 
-        threads = sorted(found.values(), key=lambda t: t["created_utc"])
-        return threads
+        return sorted(found.values(), key=lambda t: t["created_utc"])
 
     def find_daily_threads(self, subreddit: str = "wallstreetbets") -> list[dict[str, Any]]:
         """Stage 2: pick daily threads out of already-stored posts. No network."""
