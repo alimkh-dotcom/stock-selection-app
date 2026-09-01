@@ -174,3 +174,45 @@ within a calendar date first, and the spread taken across dates.
 Every symbol carries its first trade date, and mentions before it are dropped.
 This closes the `RDDT` anachronism: matched in March 2022 text, two years before
 Reddit went public.
+
+---
+
+## Crawling a source that mostly says no
+
+Measured recovery behaviour: **1 request in 6 succeeded at 12-second spacing**,
+long after the load stopped. The budget appears to refill over a long window
+rather than per minute — a fresh session sustained ~70 comments/sec, then
+degraded to near-total refusal.
+
+The two endpoints are not throttled alike. During one probe every `query=` post
+search was refused while `link_id` comment reads succeeded normally. Since the
+comments are the bulk of the work and discovery is only tens of requests, this
+is the more favourable split than it first appeared.
+
+The crawler now has a patient mode built for this condition rather than against
+it: widen the interval under sustained refusal, park for a long sleep once the
+budget is clearly gone rather than adding refused requests to a service already
+saying no, narrow again on sustained success, and commit every unit before
+starting the next so an interrupted run loses at most one.
+
+The give-up rule is calibrated against the measured regime. An early version
+abandoned the run after a few parks — which, at a 1-in-6 success rate, meant
+giving up in exactly the condition it was written for. It now parks only after
+12 consecutive refusals, which a 1-in-6 source rarely reaches, and any single
+success resets the counter.
+
+Verified end to end against the live source: 2 threads, 800 comments, no parks.
+
+## Scope correction
+
+The gate does not need the full corpus. It needs enough spike events to average
+over — a few hundred on distinct dates.
+
+| Scope | Threads | Requests |
+|---|---|---|
+| Full history | ~2,300 | ~23,000 |
+| **Gate pilot** | **~200** | **~2,000** |
+
+At ~250 MB the capped Track A dataset fits in the repository, so the crawl needs
+no cloud storage: the data is versioned with the code that produced it and
+survives session boundaries automatically.

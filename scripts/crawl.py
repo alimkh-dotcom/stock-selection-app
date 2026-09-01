@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from reddit_alpha.arctic import ArcticShiftClient, RateLimiter
 from reddit_alpha.collect import SUBREDDITS, Collector, dedupe_threads
+from reddit_alpha.patient import PatienceConfig, PatientRunner
 from reddit_alpha.storage import Manifest, RawStore
 
 
@@ -40,6 +41,12 @@ def main() -> int:
                     help="seconds between requests; raised automatically on pushback")
     ap.add_argument("--thread-types", nargs="*", default=None,
                     help="comments stage: restrict to these thread types")
+    ap.add_argument("--patient", action="store_true",
+                    help="pace for a source that refuses most requests: widen on "
+                         "refusal, park when the budget is clearly gone, commit "
+                         "each unit as it lands")
+    ap.add_argument("--budget-minutes", type=float, default=None,
+                    help="stop cleanly after this long, so a run fits a session")
     ap.add_argument("--max-comments", type=int, default=None,
                     help="cap comments taken per thread; truncation is recorded")
     ap.add_argument("--limit-units", type=int, default=None,
@@ -94,12 +101,34 @@ def main() -> int:
         return 0
 
     else:  # comments
-        threads = json.loads((args.data_dir / "daily_threads.json").read_text())
+        thread_file = args.data_dir / "daily_threads.json"
+        if not thread_file.exists():
+            print(f"No thread list at {thread_file}.\n"
+                  f"Run the discovery stage first:\n"
+                  f"  python3 scripts/crawl.py discover --start 2021-01-01 --end 2024-01-01",
+                  file=sys.stderr)
+            return 2
+        threads = json.loads(thread_file.read_text())
         if args.thread_types:
             threads = [t for t in threads if t["thread_type"] in args.thread_types]
         if args.limit_units:
             threads = [t for t in threads if not manifest.is_done(f"comments/{t['id']}")]
             threads = threads[: args.limit_units]
+        if args.patient:
+            pending = [t for t in threads if not manifest.is_done(f"comments/{t['id']}")]
+            runner = PatientRunner(PatienceConfig(
+                budget_seconds=args.budget_minutes * 60 if args.budget_minutes else None
+            ))
+            print(f"patient mode: {len(pending)} threads pending")
+            pstats = runner.run(
+                pending,
+                lambda t: collector.collect_one_thread(t, args.max_comments),
+            )
+            print(f"\n{'=' * 60}")
+            for key, value in pstats.as_dict().items():
+                print(f"  {key}: {value}")
+            print(f"manifest totals: {manifest.summary()}")
+            return 0
         stats = collector.crawl_thread_comments(threads, max_per_thread=args.max_comments)
 
     elapsed = time.monotonic() - started

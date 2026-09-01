@@ -301,41 +301,52 @@ class Collector:
             unit = f"comments/{thread['id']}"
             if self.manifest.is_done(unit):
                 continue
-
             try:
-                records = list(
-                    self.client.thread_comments(thread["id"], limit=max_per_thread)
-                )
+                count = self.collect_one_thread(thread, max_per_thread, stats)
             except ArcticShiftError as exc:
                 log.error("Failed %s: %s", unit, exc)
                 self.manifest.note_issue(unit, "comment_fetch_failed", str(exc))
                 stats.units_failed += 1
                 continue
-
-            records = [project_comment(rec) for rec in records]
-            for rec in records:
-                rec["_thread_type"] = thread["thread_type"]
-                rec["_thread_id"] = thread["id"]
-                rec["_subreddit"] = thread["subreddit"]
-
-            if max_per_thread is not None and len(records) >= max_per_thread:
-                # Hit the cap, so this thread almost certainly has more. Record
-                # it: a later analysis must be able to tell a fully-read thread
-                # from a truncated one.
-                self.manifest.note_issue(
-                    unit, "thread_truncated", f"capped at {max_per_thread}"
-                )
-                stats.units_truncated += 1
-
-            self.store.append(f"comments/{thread['thread_type']}", records)
-            self.manifest.mark_done(unit, "comments", len(records))
             stats.units_done += 1
-            stats.records += len(records)
-            log.info(
-                "%s (%s) -> %d comments",
-                datetime.fromtimestamp(thread["created_utc"], timezone.utc).date(),
-                thread["thread_type"],
-                len(records),
-            )
+            stats.records += count
 
         return stats
+
+    def collect_one_thread(
+        self,
+        thread: dict[str, Any],
+        max_per_thread: int | None = None,
+        stats: "CrawlStats | None" = None,
+    ) -> int:
+        """Fetch and store one thread, returning its record count.
+
+        Raises on failure rather than swallowing it, so a retrying caller can
+        distinguish a refusal from an empty thread. The unit is marked done only
+        after its records are on disk.
+        """
+        unit = f"comments/{thread['id']}"
+        records = list(self.client.thread_comments(thread["id"], limit=max_per_thread))
+        records = [project_comment(rec) for rec in records]
+        for rec in records:
+            rec["_thread_type"] = thread["thread_type"]
+            rec["_thread_id"] = thread["id"]
+            rec["_subreddit"] = thread["subreddit"]
+
+        if max_per_thread is not None and len(records) >= max_per_thread:
+            # Hit the cap, so this thread almost certainly has more. Record it:
+            # a later analysis must be able to tell a fully-read thread from a
+            # truncated one.
+            self.manifest.note_issue(unit, "thread_truncated", f"capped at {max_per_thread}")
+            if stats is not None:
+                stats.units_truncated += 1
+
+        self.store.append(f"comments/{thread['thread_type']}", records)
+        self.manifest.mark_done(unit, "comments", len(records))
+        log.info(
+            "%s (%s) -> %d comments",
+            datetime.fromtimestamp(thread["created_utc"], timezone.utc).date(),
+            thread["thread_type"],
+            len(records),
+        )
+        return len(records)
