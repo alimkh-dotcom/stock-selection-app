@@ -1,0 +1,10 @@
+# Crawled data: too large for git (projected ~2 GB). See docs/SCOPE.md.
+data/
+*.jsonl.gz
+*.db
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
