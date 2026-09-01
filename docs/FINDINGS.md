@@ -127,3 +127,50 @@ Not available: market cap or shares outstanding — hence dollar-volume bucketin
 `SIVB` (Silicon Valley Bank) and `BBBYQ` (Bed Bath & Beyond) returned nothing.
 Those are precisely the names this study most needs to price. Unpriceable
 mentions are counted as a headline number and treated as total losses.
+
+---
+
+## Price layer and the lead/lag gate
+
+### Transient failures must not be read as delistings
+
+An integration run marked **SOFI unpriceable** after one malformed response.
+SOFI is very much alive — it returns 103 bars on retry. Had that stood, a living
+company would have been recorded as a delisting, inflating the survivorship
+number that is a headline result of the study.
+
+Outcomes are now separated: `no_data` means the provider answered and has
+nothing (a real delisting, cached so thousands of dead symbols are not
+re-requested every run), while `error` means the request failed and is retried,
+never cached. Verified after the fix — SOFI resolves, and the genuinely
+unpriceable set is `SIVB`, `BBBYQ` and `RDDT`, all correct: two delistings and
+one company that had not yet listed in the requested window.
+
+### The event study is validated against planted signals
+
+An event study that cannot recover a signal it was handed says nothing when
+pointed at real data — a null result would be indistinguishable from a bug. The
+machinery is therefore tested on synthetic events with a known answer:
+
+| Planted | Recovered |
+|---|---|
+| Jump 3 days **after** the spike | "chatter leads price" |
+| Jump 3 days **before** the spike | "chatter follows price" |
+| No jump at all | no drift either side |
+
+Two corrections are built in rather than left to the caller:
+
+**Market adjustment.** Each stock's return has the market's subtracted. Without
+it, any day the whole market rallies makes every stack look bullish.
+
+**Clustered standard errors.** Attention spikes are not independent — hundreds
+of stocks spike together on frantic days and their returns move together.
+Treating each as an independent observation would shrink the error bars and
+manufacture significance out of a single exciting week. Events are averaged
+within a calendar date first, and the spread taken across dates.
+
+### Point-in-time gating is now enforced
+
+Every symbol carries its first trade date, and mentions before it are dropped.
+This closes the `RDDT` anachronism: matched in March 2022 text, two years before
+Reddit went public.
