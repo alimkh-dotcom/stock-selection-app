@@ -1,12 +1,12 @@
-# Reddit-only stock selection research
+# Reddit-only stock selection
 
 Does discussion in retail investing communities **anticipate** stock price moves,
 or merely **react** to them?
 
-This project tests that question using public Reddit comments as the only input.
-It is a personal, non-commercial research project. Nothing here posts, comments,
-votes, messages users, or writes to Reddit in any way — it reads public content
-and analyses it offline.
+This tests that question using public Reddit comments as the only input. It is a
+personal, non-commercial project by an individual developer. Nothing here posts,
+comments, votes, messages users, or writes to Reddit in any way — it reads public
+content and analyses it offline.
 
 ## The question, and why it comes first
 
@@ -21,7 +21,7 @@ average market-adjusted returns across thousands of them.
 - Returns rising **after** day zero → the chatter carried information.
 
 My working hypothesis is the sceptical one — that discussion mostly follows
-price. The study is built so that a negative result is a clean outcome that gets
+price. This is built so that a negative result is a clean outcome that gets
 published, not a failure.
 
 ## Status
@@ -77,4 +77,11 @@ Only comment text, timestamp, score and a pseudonymous author handle are stored.
 The handle is used solely to count distinct participants, so one person posting
 fifty times is not counted fifty times. No personal information is collected, no
 public user profiles are produced, and no Reddit content or derived dataset is
-redistributed. Deleted and removed content is dropped on refresh.
+redistributed.
+
+Deleted and removed content is honoured rather than retained — see
+[`src/reddit_alpha/retention.py`](src/reddit_alpha/retention.py). Content already
+withdrawn is dropped before it is ever written, and `purge_deleted()` rewrites an
+existing archive without content deleted since it was collected. A deleted
+*account* is deliberately not treated as a withdrawal of the comment: the text is
+still public, and the handle is only ever used to count distinct participants.
