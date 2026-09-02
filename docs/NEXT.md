@@ -29,12 +29,10 @@ thousand comments used to shake out bugs, and it did its job — it caught the
 
 ## Do this first, before any collection
 
-**Implement deletion honouring.** The submitted API request states that
-"comments deleted or removed on Reddit are dropped from the local store on
-refresh." That is not implemented yet. It was a reasonable commitment to make
-and it is cheap to build, but right now it is a claim the code does not back up.
-Build it before collecting at scale, so the statement is true from the first
-record stored.
+**Deletion honouring is implemented** (`src/reddit_alpha/retention.py`). Content
+already withdrawn is dropped before it is ever stored, in both collectors, and
+`purge_deleted()` rewrites an existing archive without content deleted since
+collection. The API request's commitment is now backed by code and tests.
 
 **Keep the author track-record feature out of v1.** The request says no
 per-user output is produced. Scoring individual users by past accuracy would

@@ -26,6 +26,7 @@ from typing import Any, Callable, Iterator
 
 from .arctic import ArcticShiftClient, ArcticShiftError
 from .fields import project_comment, project_post
+from .retention import filter_withdrawn
 from .storage import Manifest, RawStore
 
 log = logging.getLogger(__name__)
@@ -249,7 +250,7 @@ class Collector:
                     stats.units_failed += 1
                     continue
 
-                records = [project_post(rec) for rec in records]
+                records = filter_withdrawn([project_post(rec) for rec in records])
                 for rec in records:
                     rec["_subreddit"] = subreddit
                 self.store.append(f"posts/{subreddit}", records)
@@ -397,7 +398,8 @@ class Collector:
         """
         unit = f"comments/{thread['id']}"
         records = list(self.client.thread_comments(thread["id"], limit=max_per_thread))
-        records = [project_comment(rec) for rec in records]
+        # Content already withdrawn is never stored in the first place.
+        records = filter_withdrawn([project_comment(rec) for rec in records])
         for rec in records:
             rec["_thread_type"] = thread["thread_type"]
             rec["_thread_id"] = thread["id"]

@@ -62,16 +62,20 @@ def test_records_match_the_archive_schema():
     assert got[0]["_source"] == "reddit_api"
 
 
-def test_deleted_comments_are_counted_not_dropped():
-    """Deletion is this source's bias; its size must be measurable."""
+def test_withdrawn_comments_are_counted_and_not_stored():
+    """Both halves matter.
+
+    Storing withdrawn text would defeat the deletion, so it is dropped. But the
+    count is how we measure what this source is missing relative to the archive,
+    so it is recorded rather than forgotten.
+    """
     client = FakeClient([comment("c1"), comment("c2", body="[deleted]"),
                          comment("c3", body="[removed]")])
     collector = RedditCollector(client)
     got = collector.thread_comments("t1", "moves_tomorrow", "wallstreetbets")
 
-    assert len(got) == 3, "deleted comments were dropped instead of counted"
-    assert collector.stats.deleted_bodies == 2
-    assert collector.stats.as_dict()["deleted_share"] == pytest.approx(2 / 3)
+    assert [r["id"] for r in got] == ["c1"], "withdrawn text was stored"
+    assert collector.stats.deleted_bodies == 2, "withdrawn content went uncounted"
 
 
 def test_cap_truncates_and_is_recorded():

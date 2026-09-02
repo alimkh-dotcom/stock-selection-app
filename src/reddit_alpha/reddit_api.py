@@ -134,9 +134,11 @@ class RedditCollector:
                 break
             record = _to_record(comment, thread_id, thread_type, subreddit)
             if record["body"] in DELETED_MARKERS:
-                # Kept, not dropped: the count is the measure of how much this
-                # source is missing relative to the archive.
+                # Counted, then dropped. The count measures how much this source
+                # is missing relative to the archive; the drop is what honouring
+                # a deletion means -- storing withdrawn text would defeat it.
                 self.stats.deleted_bodies += 1
+                continue
             records.append(record)
 
         self.stats.threads += 1
