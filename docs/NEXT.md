@@ -58,6 +58,39 @@ refining, and update Reddit if the answer changes.
 6. Commit the collected data to the repository. At ~250 MB it fits, and it makes
    the work survive session boundaries without any cloud storage.
 
+## Kaggle route (no Reddit approval needed)
+
+Bulk corpora, far larger than anything we could crawl. Set credentials from
+kaggle.com -> Settings -> API -> Create New Token:
+
+```
+export KAGGLE_USERNAME=...
+export KAGGLE_KEY=...
+python3 scripts/kaggle_load.py mattpodolak/reddit-wallstreetbets-comments
+python3 scripts/kaggle_load.py leukipp/reddit-finance-data
+```
+
+| Dataset | Size | Through | Licence |
+|---|---|---|---|
+| `mattpodolak/reddit-wallstreetbets-comments` | 2.8 GB | Feb 2021 | CC0 |
+| `wordsforthewise/wallstreetbets-subreddit-data` | 1.7 GB | Jul 2021 | unknown |
+| `leukipp/reddit-finance-data` (multi-subreddit) | 434 MB | Jan 2022 | Reddit API Terms |
+| `injek0626/reddit-stock-related-posts` | 263 MB | Aug 2023 | Reddit API Terms |
+
+Two things to hold on to when using these.
+
+**Never concatenate them into one series.** Different collectors, different
+completeness: a jump in mention volume at the boundary between two datasets is
+an artefact, and event studies are precisely what such artefacts corrupt. Run
+the gate separately within each and compare. Records carry `_source` and land
+under per-source paths so combining has to be deliberate.
+
+**The subreddit mix is skewed toward the meme end** -- wallstreetbets, gme,
+pennystocks -- and has nothing from r/SecurityAnalysis, r/ValueInvesting,
+r/options or r/StockMarket. If the gate comes back negative, that is a result
+about WSB-style chatter, not about every investing community. The Reddit API,
+if it is ever granted, is the way to cover the analytical end.
+
 ## If the archive is the only route
 
 It answered roughly 1 request in 6 at 12-second spacing, and the budget appears
